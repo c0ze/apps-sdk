@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
+import Database from "better-sqlite3";
 
 const todoHtml = readFileSync("public/todo-widget.html", "utf8");
 
@@ -14,15 +15,67 @@ const completeTodoInputSchema = {
   id: z.string().min(1),
 };
 
-let todos = [];
-let nextId = 1;
+// Initialize SQLite database
+const db = new Database("todos.db");
+db.pragma("journal_mode = WAL");
 
-const replyWithTodos = (message) => ({
+// Create tables
+db.exec(`
+  CREATE TABLE IF NOT EXISTS todos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    todo_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    completed INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_todos_session ON todos(session_id);
+`);
+
+// Database helper functions
+function getTodos(sessionId) {
+  const rows = db.prepare(
+    "SELECT todo_id as id, title, completed FROM todos WHERE session_id = ? ORDER BY id"
+  ).all(sessionId);
+  return rows.map(row => ({
+    id: row.id,
+    title: row.title,
+    completed: Boolean(row.completed)
+  }));
+}
+
+function getNextTodoId(sessionId) {
+  const result = db.prepare(
+    "SELECT COUNT(*) as count FROM todos WHERE session_id = ?"
+  ).get(sessionId);
+  return result.count + 1;
+}
+
+function addTodo(sessionId, todoId, title) {
+  db.prepare(
+    "INSERT INTO todos (session_id, todo_id, title) VALUES (?, ?, ?)"
+  ).run(sessionId, todoId, title);
+}
+
+function completeTodo(sessionId, todoId) {
+  const result = db.prepare(
+    "UPDATE todos SET completed = 1 WHERE session_id = ? AND todo_id = ?"
+  ).run(sessionId, todoId);
+  return result.changes > 0;
+}
+
+function findTodo(sessionId, todoId) {
+  return db.prepare(
+    "SELECT todo_id as id, title, completed FROM todos WHERE session_id = ? AND todo_id = ?"
+  ).get(sessionId, todoId);
+}
+
+const replyWithTodos = (sessionId, message) => ({
   content: message ? [{ type: "text", text: message }] : [],
-  structuredContent: { tasks: todos },
+  structuredContent: { tasks: getTodos(sessionId) },
 });
 
-function createTodoServer() {
+function createTodoServer(sessionId) {
   const server = new McpServer({ name: "todo-app", version: "0.1.0" });
 
   server.registerResource(
@@ -55,10 +108,11 @@ function createTodoServer() {
     },
     async (args) => {
       const title = args?.title?.trim?.() ?? "";
-      if (!title) return replyWithTodos("Missing title.");
-      const todo = { id: `todo-${nextId++}`, title, completed: false };
-      todos = [...todos, todo];
-      return replyWithTodos(`Added "${todo.title}".`);
+      if (!title) return replyWithTodos(sessionId, "Missing title.");
+      const nextId = getNextTodoId(sessionId);
+      const todoId = `todo-${nextId}`;
+      addTodo(sessionId, todoId, title);
+      return replyWithTodos(sessionId, `Added "${title}".`);
     }
   );
 
@@ -76,17 +130,15 @@ function createTodoServer() {
     },
     async (args) => {
       const id = args?.id;
-      if (!id) return replyWithTodos("Missing todo id.");
-      const todo = todos.find((task) => task.id === id);
+      if (!id) return replyWithTodos(sessionId, "Missing todo id.");
+      const todo = findTodo(sessionId, id);
       if (!todo) {
-        return replyWithTodos(`Todo ${id} was not found.`);
+        return replyWithTodos(sessionId, `Todo ${id} was not found.`);
       }
 
-      todos = todos.map((task) =>
-        task.id === id ? { ...task, completed: true } : task
-      );
+      completeTodo(sessionId, id);
 
-      return replyWithTodos(`Completed "${todo.title}".`);
+      return replyWithTodos(sessionId, `Completed "${todo.title}".`);
     }
   );
 
@@ -101,12 +153,13 @@ function createTodoServer() {
       },
     },
     async () => {
+      const todos = getTodos(sessionId);
       const count = todos.length;
       const completedCount = todos.filter((t) => t.completed).length;
       const message = count === 0
         ? "No todos found."
         : `Found ${count} todo(s), ${completedCount} completed.`;
-      return replyWithTodos(message);
+      return replyWithTodos(sessionId, message);
     }
   );
 
@@ -145,7 +198,10 @@ const httpServer = createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
 
-    const server = createTodoServer();
+    // Get session ID from header or generate a default one
+    const sessionId = req.headers["mcp-session-id"] || "default-session";
+
+    const server = createTodoServer(sessionId);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless mode
       enableJsonResponse: true,

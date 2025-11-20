@@ -2,10 +2,12 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "inspect": "npx @modelcontextprotocol/inspector -- http://localhost:8787/mcp"
+    "inspect": "npx @modelcontextprotocol/inspector -- http://localhost:8787/mcp",
+    "db:list": "sqlite3 -header -column todos.db 'SELECT session_id, todo_id, title, completed FROM todos ORDER BY session_id, id;'"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.22.0",
+    "better-sqlite3": "^12.4.1",
     "zod": "^3.25.76"
   }
 }
