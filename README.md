@@ -2,6 +2,8 @@
 
 A Model Context Protocol (MCP) server that provides todo management with SQLite persistence.
 
+Based on the [OpenAI Apps SDK Quickstart](https://developers.openai.com/apps-sdk/quickstart) tutorial.
+
 ## Prerequisites
 
 - Node.js 20.x or higher
